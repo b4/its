@@ -146,6 +146,7 @@
 - MTBOOT, make bootable tapes.
 - MUDDLE, MDL interpreter.
 - NAME, shows logged in users and locations, aka FINGER.
+- NAMDRG, free TV display.
 - NETIME, network time dragon.
 - NICNAM/NICWHO, look up someone in the Arpanet directory.
 - NIMLIN, a game of unknown features.
