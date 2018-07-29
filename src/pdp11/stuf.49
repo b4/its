@@ -1,0 +1,517 @@
+; SASTUF - Useful stuff for stand alone PDP11 programs   -*-PALX-*-
+savn==%fnam2
+
+
+; Terminal type codes
+%tntt==1	; TTY
+%tnsb==2	; Stupid-Bee
+%tnvt==3	; VT52
+
+
+; String output macros
+.macro	print text
+	jsr r5,typesc
+	  .string ^~text~
+.endm
+
+.macro	sout text
+	jsr r5,itypes
+	  .string ^~text~
+.endm
+
+.sbttl	Initialization
+
+	.=1000
+go:	mov #1000,sp		; set stack ptr
+	reset			; send INIT on bus
+	spl 0			; priority 0 for normal operation
+	mov #nxmt,@#4
+	mov #pr7,@#6
+	mov #24,r0		; ptr to power fail vector
+	mov pc,(r0)		; set to power fail handler
+	add #powerf-.,(r0)+	; ...
+	mov #pr7,(r0)+		; PS for good measure
+	jsr r5,catchn		; setup catch for NXM
+	  1$-.
+	mov #20000,r5 		; Start from 4K
+loop <	  tst (r5) 		; any core there?
+	  add #4000,r5		; yes, go up 1K
+	  rptl
+	  >
+1$:	mov r5,memtop 		; top location+2 (1st nxm)
+	mov #60,r0		; ptr to TTY interrupt vector
+	mov pc,(r0)		; set rcvr interrupt PC
+	add #tk1int-.,(r0)+	; ...
+	mov #pr4,(r0)+		; set rcvr interrupt PS
+.if ne  ndz
+	mov #dzv,r0		; ptr to DZ interrupt vector
+	mov pc,(r0)		; set rcvr interrupt PC
+	add #dzrint-.,(r0)+	; ...
+	mov #pr5,(r0)+		; set rcvr interrupt PS
+.endc
+	mov #-1,reread
+	clr typein
+	mov #100,@#tks		; turn on TTY input interrupts
+
+.if eq  <sys-mit>*<sys-mit44>
+.if ne  ndz
+
+	jsr r5,catchn		; setup NXM catch in case no DZ
+	  inittt-.
+	mov #dzaddr,r4		; DZ address
+	mov #20,(r4)		; initialize DZ
+loop <	  bit #20,(r4)		; wait for done
+	  rptl ne
+	  >
+	mov #dzlpar,r1		; ptr DZ line parameter table
+	mov #8.,r0		; no. of entries
+loop <	  mov (r1)+,2(r4)	; set DZ line parameters
+	  sorl r0
+	  >
+	mov #177401,4(r4)	; set data term rdys, enable xmit on line 0
+	mov #40,(r4)		; enable receiver
+
+; Check to see if either a VT52 or SB is connected to the DZ line 0.
+
+	mov r4,isr		; set so DZ used for output
+	sout ^"a"		; SB command to send back cursor address
+	mov #77777,r0		; no. of times to loop, about 1/3 sec
+loop <	  tstb (r4)		; loop, waiting for input
+	  bmi initsb
+	  sorl r0
+	  >
+	sout ^"Z"		; VT52 command to send back id
+	mov #77777,r0		; no. of times to loop, about 1/3 sec
+loop <	  tstb (r4)		; loop, waiting for input
+	  bmi initvt
+	  sorl r0
+	  >
+	mov #140,(r4)		; turn on rcvr interrupts
+	br inittt		; neither VT52 or SB respond on DZ line 0
+				; so use TTY
+
+; Initialize for StupidBee
+initsb:	mov #8.,r1		; no. of chars to ignore
+	jsr r5,ignore		; slurp up SB's cursor address (8 chars)
+	mov r4,isr		; set to use SB
+	mov #%tnsb,ttytyp	; set terminal type
+	mov #80.,linel		; set line length
+	mov #25.-1,pagel	; set page length
+	sout ^"H        1        1        1        1        1        1        1        1        1H"	; set tabs and leave cursor home
+	clr vpos		; set position to home
+	clr hpos		; ...
+	mov #140,(r4)		; turn on ints
+	jmp start
+
+; Initialize for using VT52
+initvt:	mov #3.,r1		; no. of chars to ignore
+	jsr r5,ignore		; slurp up VT52's identification (3 chars)
+	mov r4,isr		; set to use VT52
+	mov #%tnvt,ttytyp	; set terminal type
+	mov #80.,linel		; set line length
+	mov #24.-1,pagel	; set page length
+	sout ^"H"		; home up
+	clr vpos		; set position to home
+	clr hpos		; ...
+	mov #140,(r4)		; turn on ints
+	jmp start
+
+.endc	; ne ndz
+.endc	; eq sys-mit
+
+
+.if eq  <sys-mit>*<sys-mit44>
+; Initialize for using TTY
+inittt:	mov #tks,isr		; set to use TTY
+	mov #%tntt,ttytyp	; set terminal type
+	mov #132.,linel		; set line length
+	print ^"
+"				; CRLF
+	jmp start
+.endc
+
+.if eq  sys-sao
+; Initialize for using VT52
+initvt:	mov #tks,isr		; set to use VT52
+	mov #%tnvt,ttytyp	; set terminal type
+	mov #80.,linel		; set line length
+	mov #24.-1,pagel	; set page length
+	sout ^"H"		; home up
+	clr vpos		; set position to home
+	clr hpos		; ...
+	jmp start
+.endc
+
+
+; IGNORE throws away the next few characters of input from DZ11.
+; R1 contains no. of chars to ignore.
+ignore:	tstb (r4)		; wait for next character to come in
+	bpl ignore
+	movb 2(r4),r0		; read next char
+	sob r1,ignore
+	rts r5
+
+
+; Power fail handler.
+powerf:	add #poweru-powerf,@#24	; Setup for powerup trap
+	halt
+
+; Power up handler.
+poweru:	add #powerf-poweru,@#24	; setup for another power fail
+	jmp go
+
+nxmt:	mov @#nxmcat,(sp)
+	rti
+
+
+; CATCHN is called to setup for an expected nxm trap.
+; When the nxm trap occurs control will be passed to address
+; specified by a relative ptr after the call.
+
+catchn:	mov r5,@#nxmcat		; set catch for address specified
+	add (r5)+,@#nxmcat	; by relative ptr after call
+	rts r5
+
+nxmcat==42
+
+.sbttl	Numeric input/output
+
+; OCTAL types R0 as an octal no.
+octal:	push r1			; save reg
+	mov r0,r1		; put no. in r1
+	clr r0
+	sec			; so won't exit loop till after 6 digits
+	br 1$
+loop <	  rol r1		; shift three binary bits from R1 into R0
+	  rol r0
+	  rol r1
+	  rol r0
+1$:	  rol r1
+	  exitl eq
+	  rol r0
+	  add #'0,r0		; make digit ascii
+	  jsr r5,typec		; type it
+	  clr r0
+	  rptl
+	  >
+	pop r1			; restore reg
+	rts r5
+
+
+; OCTALS types R0 as an octal no. with leading zeros suppressed
+octals:	push r0			; save no.
+	clc			; shift out lowest digit
+	ror r0			; ...
+	asr r0			; ...
+	asr r0			; ...
+	if ne,<
+	  jsr r5,octals		; type leading digits first
+	  >
+	pop r0			; restore no.
+	bic #177770,r0		; get lowest octal digit
+	add #'0,r0		; convert to ascii
+	jsr r5,typec		; type digit
+	rts r5
+
+
+; RNUMBR takes numberic input from the terminal.  The no. is returned in R0.
+; If followed by "." the no. is decimal, otherwise octal.
+rnumbr:	push r1,r2		; save reg
+	clr r1			; octal accumulator
+	clr r2			; decimal accumulator
+loop <	  jsr r5,readc
+	  cmp r0,#'0		; check if numeric
+	  exitl lo
+	  cmp r0,#'9
+	  exitl hi
+	  sub #'0,r0		; convert to ascii
+	  ash #3,r1		; multiply by 8.
+	  asl r2		; multiply by 10.
+	  mov r2,-(sp)		; ...
+	  ash #2,r2		; ...
+	  add (sp)+,r2		; ...
+	  add r0,r1		; add to octal no.
+	  add r0,r2		; add to decimal no.
+	  rptl
+	  >
+	cmp r0,#'.		; terminator "."?
+	if eq,<
+	  mov r2,r0		; yes, decimal
+	  >
+	else <
+	  mov r0,reread		; otherwise reread terminator
+	  mov r1,r0		; and use octal no.
+	  >
+	pop r2,r1		; restore regs
+	rts r5
+
+.sbttl	Terminal input
+
+; READC gets next character and does input processing and echoing.
+readc:	mov reread,r0		; character to be reread?
+	if mi,<
+	  jsr r5,ireadc		; get character
+	  cmp r0,#21		; ^Q?
+	  beq 2$
+	  cmp r0,#23		; ^S
+	  beq 2$
+	  cmp r0,#12		; LF?
+	  beq 1$
+	  cmp r0,#15		; CR?
+	  if eq,<
+1$:	    print ^"
+"				; type CRLF for CR
+	    >
+	  else <
+	    jsr r5,typec	; echo the character
+	    >
+	  cmp r0,#'a		; lower case?
+	  if his,<
+	    cmp r0,#'z
+	    if los,<
+	      sub #'a-'A,r0	; convert to upper case
+	      >
+	    >
+	  >
+2$:	mov #-1,reread		; no character to reread
+	rts r5
+
+
+; IREADC gets next character typed on terminal into R0.
+ireadc:
+loop <	  spl 4			; set priority 4 to test flag
+	  tst typein		; character in yet?
+	  exitl ne
+	  push #0		; PS for RTI
+	  jsr pc,1$		; put PC on stack for RTI
+	  wait			; wait for an interrupt to occur
+	  rptl
+1$:	  rtt			; set PR0 and execute WAIT without interrupt
+	  >
+	mov inchar,r0		; get character typed
+	clr typein		; clear typein flag
+	spl 0			; lower priority
+	rts r5
+
+
+; Terminal input interrupts
+
+; TTY rcvr interrupts
+tk1int:	movb @#tkb,inchar	; get character
+	mov #tks,isr		; output to TTY now
+	br tkint
+
+.if ne  ndz
+; DZ11 rcvr interrupts
+dzrint:	push r1,r4		; save regs
+	mov #dzaddr,r4		; DZ11 address
+loop <	  mov 2(r4),r1		; get character
+	  exitl pl
+	  movb r1,inchar	; save
+	  swab r1		; get line no.
+	  bic #177770,r1	; ...
+	  movb bits(r1),4(r4)	; enable corresponding output line
+	  rptl
+	  >
+	mov r4,isr		; output to DZ now
+	pop r4,r1		; restore regs
+	br tkint
+.endc
+
+
+tkint:	bic #177600,inchar	; clear random bits
+	cmp inchar,#7		; ^G?
+	if eq,<
+	  jmp go		; restart program on ^G
+	  >
+	cmp inchar,#5		; ^E?
+	if eq,<
+	  mov pc,silent		; silence output
+	  >
+	cmp inchar,#23		; ^S?
+	if eq,<
+	  mov pc,xonxof		; no output until ^Q
+	  br 1$
+	  >
+	cmp inchar,#21		; ^Q?
+	if eq,<
+	  clr xonxof		; no output until ^S
+	  br 1$
+	  >
+	mov #-1,typein		; indicate there is typein
+1$:	rti
+
+.sbttl	Terminal output
+
+; TYPESC takes a relative ptr to an asciz string after the JSR R5,TYPES
+; and types the string
+typesc:	push r0,r1		; save regs
+	mov r5,r1		; relative ptr to asciz string
+	add (r5)+,r1		; make absolute
+loop <	  movb (r1)+,r0		; next char
+	  exitl eq		; null terminates
+	  jsr r5,typec		; output char
+	  rptl
+	  >
+	pop r1,r0		; restore regs
+	rts r5
+
+; TYPES takes a ptr to an asciz string in R1 and types the string.
+types:	push r0			; save reg
+loop <	  movb (r1)+,r0		; next char
+	  exitl eq		; null terminates
+	  jsr r5,typec		; output char
+	  rptl
+	  >
+	pop r0			; restore reg
+	rts r5
+
+
+; TYPEC types character in R0.  Extensive output processing is done.
+typec:	push r0,r1		; save regs
+	tst silent		; output suppressed?
+	bne tyr
+1$:	tst xonxof		; waiting for a ^Q
+	bne 1$			; keep waiting
+	cmpb r0,#11		; TAB?
+	beq tytab
+	cmpb r0,#12		; LF?
+	beq tylf
+	cmpb r0,#15		; CR?
+	beq tycr
+	cmpb r0,#7		; BELL?
+	beq tyt
+	cmpb r0,#177		; RUBOUT?
+	beq tyt
+	cmpb r0,#'		; clear screen?
+	beq tyclr
+	cmpb r0,#'		; ignore ^S
+	beq tyr
+	cmp r0,#40
+	if lo,<
+	  sout ^"^"
+	  inc hpos
+	  bis #100,r0
+	  >
+	inc hpos		; keep track of horizontal pos
+tyt:	jsr r5,itypec		; type it
+tyr:	pop r1,r0		; restore regs
+	rts r5
+
+tycr:	jsr r5,itypec		; type CR
+	clr hpos		; update position
+	br tyr
+tylf:	cmp ttytyp,#%tntt	; TTY or display?
+	if eq,<
+	  jsr r5,itypec		; TTY, just send LF
+	  br tyr
+	  >
+	inc vpos		; move to next line
+	cmp vpos,pagel		; beyond end of page?
+	if hi,<
+	  sout ^"H"		; yes, wrap to top line
+	  clr vpos		; keep track of position
+	  >
+	else <
+	  jsr r5,itypec
+	  >
+	sout ^"K"		; erase line
+	cmp vpos,pagel		; on last line?
+	blo tyr
+	tst more		; do --More-- processing?
+	beq tyr
+	print ^"--More--"	; prompt
+	jsr r5,readc		; read char, space = yes, rubout = no
+	sout ^"HK"
+	clr hpos
+	clr vpos
+	cmpb r0,#40
+	if ne,<
+	  mov pc,silent		; stop output
+	  cmpb r0,#15		; carriage-return?
+	  if eq,<
+	    mov #-1,reread	; don't reread character
+	    >
+	  else <
+	    mov r0,reread	; else reread character
+	    >
+	  >
+	br tyr
+tytab:	cmp ttytyp,#%tntt	; TTY?
+	if ne,<
+	  jsr r5,itypec		; not tty, just output a tab
+	  add #8.,hpos
+	  bic #7,hpos
+	  br tyr
+	  >
+	movb #40,r0		; on TTY simulate with spaces
+loop <	  jsr r5,itypec
+	  inc hpos
+	  bit #7,hpos
+	  rptl ne
+	  >
+	br tyr
+tyclr:	cmp ttytyp,#%tntt	; TTY?
+	if ne,<
+	  sout ^"HJ"		; not tty, HOME and then EOS
+	  clr hpos
+	  clr vpos
+	  >
+	else <
+	  print ^"
+"				; TTY, CRLF
+	  >
+	br tyr
+
+
+; ITYPES takes a relative ptr to an asciz string after the JSR R5,ITYPES
+; and image types the string.
+itypes:	push r0,r1		; save regs
+	mov r5,r1		; relative ptr to asciz string
+	add (r5)+,r1		; make absolute
+loop <	  movb (r1)+,r0		; next char
+	  exitl eq		; null terminates
+	  jsr r5,itypec		; output
+	  rptl
+	  >
+	pop r1,r0		; restore regs
+	rts r5
+
+; ITYPEC takes a character in R0 and image types it (i.e. does not
+; do any output conversions or update cursor position).
+itypec:	push r1			; save reg
+	mov isr,r1		; get terminal address
+	cmp isr,#dzaddr		; DZ11?
+	if eq,<
+  loop <    tst (r1)		; wait for xmtr ready
+	    rptl pl
+	    >
+	  >
+	else <
+  loop <    tstb 4(r1)		; wait for printer ready
+	    rptl pl
+	    >
+	  >
+	movb r0,6(r1)		; send char
+	pop r1			; restore reg
+	rts r5
+
+.sbttl	Data
+
+memtop:	.word 0			; first nxm location
+silent:	.word 0			; silence output flag
+xonxof: .word 0			; non-zero if waiting for ^Q
+more:	.word 0			; do --More-- processing flag
+ttytyp:	.word 0			; terminal type
+isr:	.word 0			; address of output device
+linel:	.word 0			; line length
+pagel:	.word 0			; page length
+hpos:	.word 0			; horizontal position
+vpos:	.word 0			; vertical position
+reread:	.word 0			; character to be reread
+typein:	.word 0			; typein flag
+inchar:	.word 0			; interrupt char
+
+
+; patch area
+patch:	pat:	.blkw 100
